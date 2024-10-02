@@ -279,7 +279,7 @@ def main():
         # Control frame rate
         clock.tick(30)
 
-    
+
     pygame.quit()
     feedback_gui.window.destroy()
 
