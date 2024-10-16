@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import Scale
 import math
 import random
+import os
 
 # Policy Network with LSTM for memory retention
 class ActuatorPolicyNet(nn.Module):
@@ -65,7 +66,7 @@ class RLHFSystem:
         self.rewards.append(adjusted_reward)
 
     def integrate_human_feedback(self, reward):
-        feedback_factor = self.human_feedback / 100.0
+        feedback_factor = self.human_feedback / 50.0
         adjusted_reward = reward * feedback_factor
         return adjusted_reward
 
@@ -76,7 +77,12 @@ class RLHFSystem:
             R = r + self.gamma * R
             returns.insert(0, R)
         returns = torch.tensor(returns).to(self.device)
-        return (returns - returns.mean()) / (returns.std() + 1e-5)
+        returns = self.standardize(returns)
+        adj_returns = self.integrate_human_feedback(returns)
+        return adj_returns
+    
+    def standardize(self, x):
+        return (x - x.mean()) / (x.std() + 1e-5)
 
     def update_policy(self):
         if not self.log_probs:
@@ -94,11 +100,6 @@ class RLHFSystem:
         self.log_probs = []
         self.rewards = []
 
-
-import math
-import torch
-import pygame
-
 class BallInCageEnv:
     def __init__(self):
         self.width, self.height = 600, 600
@@ -107,8 +108,8 @@ class BallInCageEnv:
         self.ball_radius = 15
         self.enemy_radius = 15  # Radius of enemy ball
         self.max_enemy_speed = 5  # Maximum enemy speed
-        self.max_penalty = -10  # Maximum penalty for full collision
-        self.proximity_penalty_range = self.ball_radius + self.enemy_radius + 20  # Effective range for increasing penalty
+        self.max_penalty = 25  # Maximum penalty for full collision
+        self.proximity_penalty_range = self.ball_radius + self.enemy_radius + 50  # Effective range for increasing penalty
 
     def reset(self):
         self.ball_pos = [random.randint(100, 500), random.randint(100, 500)]
@@ -170,21 +171,17 @@ class BallInCageEnv:
         penalty = self.calculate_proximity_penalty(distance)
 
         # Return reward with the proximity penalty applied
-        return 0.1 - penalty  # Small reward for avoiding enemy, reduced by penalty
+        return 0.0 - penalty
 
     def calculate_proximity_penalty(self, distance):
         # If within collision range, apply maximum penalty
         if distance < (self.ball_radius + self.enemy_radius):
             return self.max_penalty
 
-        # If within the proximity penalty range, apply a scaled penalty
-        if distance < self.proximity_penalty_range:
-            proximity_ratio = (self.proximity_penalty_range - distance) / self.proximity_penalty_range
-            penalty = self.max_penalty * proximity_ratio
-            return penalty
-
-        # Reward if outside the effective range
-        return 0.0
+        # Apply a scaled penalty; the closer, the higher the penalty. Past range, penalty is negative (reward)
+        proximity_ratio = (self.proximity_penalty_range - distance) / self.proximity_penalty_range
+        penalty = self.max_penalty * proximity_ratio
+        return penalty
 
     def check_collision(self, pos1, pos2):
         dist = math.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
@@ -207,15 +204,28 @@ class HumanFeedbackGUI:
     def __init__(self, rlhf_system):
         self.rlhf_system = rlhf_system
         self.window = tk.Tk()
-        self.window.title("Human Feedback")
+        self.window.title("Cost Slider")
         self.slider = Scale(self.window, from_=0, to=100, orient="horizontal", length=300)
-        self.slider.set(100)  # Start with maximum feedback
+        self.slider.set(50)  # Start with avg cost
         self.slider.pack()
 
     def update_feedback(self):
         self.rlhf_system.human_feedback = self.slider.get()
         self.window.update_idletasks()
         self.window.update()
+
+
+def model_params_match(model, path):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # if multiple GPUs, use cuda:0, cuda:1, etc.
+    checkpoint = torch.load(path, map_location=device)
+    model_state_dict = model.state_dict()
+    # Compare the shapes of the parameters
+    for name, param in checkpoint.items():
+        if name not in model_state_dict:
+            return False
+        if model_state_dict[name].shape != param.shape:
+            return False
+    return True
 
 # Main function to run the environment
 def main():
@@ -228,7 +238,10 @@ def main():
 
     input_size = 6  # State space: relative enemy position (2) + wall distances (4)
     hidden_size = 64
+    
     policy_net = ActuatorPolicyNet(input_size, hidden_size, output_size=4).to(device)
+    if os.path.exists(r'models/actuator_policy_net.pth') and model_params_match(policy_net, r'models/actuator_policy_net.pth'):
+        policy_net.load_state_dict(torch.load(r'models/actuator_policy_net.pth'))
     optimizer = optim.Adam(policy_net.parameters(), lr=0.001)
     rlhf_system = RLHFSystem(policy_net, optimizer, device=device)
 
@@ -238,7 +251,7 @@ def main():
     state = env.reset().to(device)
     running = True
     clock = pygame.time.Clock()
-    update_interval = 10  # Update policy every N steps
+    update_interval = 2  # Update policy every N steps
     step = 0
 
     while running:
@@ -279,7 +292,8 @@ def main():
         # Control frame rate
         clock.tick(30)
 
-
+    # Save the trained policy network
+    torch.save(rlhf_system.policy_net.state_dict(), r'models/actuator_policy_net.pth')
     pygame.quit()
     feedback_gui.window.destroy()
 
