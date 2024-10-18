@@ -9,5 +9,9 @@
 #### Emotive Recognition for Vibe Check 
 
 #### Joint Encoding Predictive Architectures for Action Search 
+Notes:
+Probabalistic vs Energy-based
+contrastive vs regularized methods
 
 #### Chase Game
+Model-free RL vs Model Predictive Control / MPC formulations
