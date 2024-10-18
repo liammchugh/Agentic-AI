@@ -8,6 +8,6 @@
 
 #### Emotive Recognition for Vibe Check 
 
-#### Joint Encoding Architectures 
+#### Joint Encoding Predictive Architectures for Action Search 
 
 #### Chase Game
