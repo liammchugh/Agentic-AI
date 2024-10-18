@@ -3,10 +3,11 @@
 
 
 ## Projects
-#### Chase Game
+
+#### Emotive Recognition RL Home Explorer-Bot
+
+#### Emotive Recognition for Vibe Check 
 
 #### Joint Encoding Architectures 
 
-#### Emotive Recognition and RL Bot
-
-#### Emotive Recognition for Vibe Check 
+#### Chase Game
