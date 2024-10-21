@@ -109,15 +109,51 @@ def objective(trial):
 
     # Optuna tries to minimize by default, so return -val_acc for maximizing validation accuracy
     return -val_acc
+from hyperopt import fmin, tpe, hp, Trials
+from hyperopt.fmin import space_eval
 
-import optuna
-# Start hyperparameter optimization
-study = optuna.create_study(direction="minimize")
-study.optimize(objective, n_trials=20)  # Perform 20 trials
+# Define search space
+space = {
+    'lr': hp.loguniform('lr', -5, -3),  # Learning rate (log scale)
+    'hidden_dim': hp.quniform('hidden_dim', 128, 512, 1),
+    'batch_size': hp.quniform('batch_size', 8, 32, 1)
+}
 
-# Get best hyperparameters
-best_params = study.best_params
-print(f"Best Hyperparameters: {best_params}")
+# Objective function
+def objective(params):
+    lr = params['lr']
+    hidden_dim = int(params['hidden_dim'])
+    batch_size = int(params['batch_size'])
+
+    # Create DataLoaders
+    train_loader = DataLoader(SERDataset(train_files, train_labels, processor), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(SERDataset(val_files, val_labels, processor), batch_size=batch_size, shuffle=False)
+
+    # Initialize model
+    input_dim = 1024
+    num_classes = 4
+    classifier = EmotionClassifier(input_dim, hidden_dim, num_classes)
+    ser_model = SERModel(xlsr_model, classifier, layer_to_extract=12)
+
+    # Optimizer and criterion
+    optimizer = optim.Adam(ser_model.classifier.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    # Train model
+    train_model(ser_model, train_loader, val_loader, criterion, optimizer, num_epochs=5)
+
+    # Validate model
+    val_acc = validate_model(ser_model, val_loader, criterion)
+
+    return -val_acc
+
+# Run hyperparameter optimization
+trials = Trials()
+best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=20, trials=trials)
+
+# Show the best parameters
+print(f"Best Hyperparameters: {space_eval(space, best)}")
+
 
 torch.save({
     'model_state_dict': ser_model.state_dict(),

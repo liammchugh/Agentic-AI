@@ -7,6 +7,7 @@ from tkinter import Scale
 import math
 import random
 import os
+import numpy as np
 
 # Policy Network with LSTM for memory retention
 class ActuatorPolicyNet(nn.Module):
@@ -33,18 +34,62 @@ class ActuatorPolicyNet(nn.Module):
         # Initialize the hidden state of the LSTM (both hidden and cell states)
         return (torch.zeros(1, 1, self.hidden_size).to(device),
                 torch.zeros(1, 1, self.hidden_size).to(device))
+        
+# Environment Model Network
+class EnvironmentModel(nn.Module):
+    def __init__(self, state_size, action_size, hidden_size):
+        super(EnvironmentModel, self).__init__()
+        self.fc1 = nn.Linear(state_size + action_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.next_state = nn.Linear(hidden_size, state_size)
+        self.reward = nn.Linear(hidden_size, 1)
     
+    def forward(self, state, action):
+        x = torch.cat([state, action], dim=-1)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        next_state = self.next_state(x)
+        reward = self.reward(x)
+        return next_state, reward
+
+# Value Function Network
+class ValueFunction(nn.Module):
+    def __init__(self, state_size, hidden_size):
+        super(ValueFunction, self).__init__()
+        self.fc1 = nn.Linear(state_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, 1)
+    
+    def forward(self, state):
+        x = torch.relu(self.fc1(state))
+        x = torch.relu(self.fc2(x))
+        value = self.value(x)
+        return value
 
 class RLHFSystem:
-    def __init__(self, policy_net, optimizer, gamma=0.99, device='cpu'):
+    def __init__(
+        self, policy_net, env_model, value_function,
+        optimizer_policy, optimizer_env_model, optimizer_value,
+        gamma=0.99, lam=0.9, device='cpu', method='MC'
+    ):
         self.policy_net = policy_net
-        self.optimizer = optimizer
+        self.env_model = env_model
+        self.value_function = value_function
+        self.optimizer_policy = optimizer_policy
+        self.optimizer_env_model = optimizer_env_model
+        self.optimizer_value = optimizer_value
         self.gamma = gamma
+        self.lam = lam  # For TD(λ)
         self.log_probs = []
         self.rewards = []
+        self.states = []
+        self.actions = []
+        self.next_states = []
+        self.dones = []
         self.human_feedback = 1.0  # Neutral feedback
         self.device = device
         self.hidden = self.policy_net.init_hidden(self.device)  # Initialize hidden states
+        self.method = method  # 'MC' or 'TD_lambda'
 
     def select_action(self, state):
         state = state.unsqueeze(0).to(self.device)  # Ensure the state has batch dimension
@@ -60,15 +105,45 @@ class RLHFSystem:
 
         return action, log_prob
 
-    def store_outcome(self, log_prob, reward):
+    def store_transition(self, state, action, log_prob, reward, next_state, done):
         adjusted_reward = self.integrate_human_feedback(reward)
         self.log_probs.append(log_prob)
         self.rewards.append(adjusted_reward)
+        self.states.append(state)
+        self.actions.append(action)
+        self.next_states.append(next_state)
+        self.dones.append(done)
 
     def integrate_human_feedback(self, reward):
         feedback_factor = self.human_feedback / 50.0
         adjusted_reward = reward * feedback_factor
         return adjusted_reward
+
+    def update_policy(self):
+        if self.method == 'MC':
+            self.update_policy_mc()
+        elif self.method == 'TD_lambda':
+            self.update_policy_td_lambda()
+        else:
+            raise ValueError("Invalid method selected. Choose 'MC' or 'TD_lambda'.")
+
+    def update_policy_mc(self):
+        # Monte Carlo Policy Gradient Update
+        returns = self.compute_returns()
+        policy_loss = []
+        for log_prob, R in zip(self.log_probs, returns):
+            policy_loss.append(-log_prob * R)
+        loss = torch.stack(policy_loss).sum()
+
+        self.optimizer_policy.zero_grad()
+        loss.backward()
+        self.optimizer_policy.step()
+
+        # Train the environment model
+        self.train_env_model()
+
+        # Clear stored data
+        self.reset_memory()
 
     def compute_returns(self):
         R = 0
@@ -80,25 +155,74 @@ class RLHFSystem:
         returns = self.standardize(returns)
         adj_returns = self.integrate_human_feedback(returns)
         return adj_returns
-    
+
     def standardize(self, x):
         return (x - x.mean()) / (x.std() + 1e-5)
 
-    def update_policy(self):
-        if not self.log_probs:
-            return  # Skip update if no log_probs collected
-        returns = self.compute_returns()
-        policy_loss = []
-        for log_prob, R in zip(self.log_probs, returns):
-            policy_loss.append(-log_prob * R)
-        loss = torch.stack(policy_loss).sum()
+    def update_policy_td_lambda(self):
+        # TD(λ) Update with Eligibility Traces
+        T = len(self.states)
+        values = []
+        for state in self.states:
+            value = self.value_function(state)
+            values.append(value)
+        values = torch.stack(values).squeeze()
 
-        self.optimizer.zero_grad()
-        loss.backward(retain_graph=False)  # No need to retain the graph for future updates
-        self.optimizer.step()
+        self.optimizer_policy.zero_grad()
+        self.optimizer_value.zero_grad()
 
+        G = torch.zeros(1).to(self.device)
+        for t in reversed(range(T)):
+            if t == T - 1:
+                G = self.rewards[t]
+            else:
+                G = self.rewards[t] + self.gamma * ((1 - self.lam) * values[t + 1] + self.lam * G)
+            advantage = G - values[t]
+            policy_loss = -self.log_probs[t] * advantage.detach()
+            value_loss = advantage.pow(2)
+
+            policy_loss.backward(retain_graph=True)
+            value_loss.backward(retain_graph=True)
+
+        self.optimizer_policy.step()
+        self.optimizer_value.step()
+
+        # Train the environment model
+        self.train_env_model()
+
+        # Clear stored data
+        self.reset_memory()
+
+    def train_env_model(self):
+        # Train the environment model using collected transitions
+        states = torch.stack(self.states).to(self.device)
+        actions = torch.stack(self.actions).to(self.device)
+        if actions.dim() == 3:
+            actions = actions.squeeze(1)
+
+        next_states = torch.stack(self.next_states).to(self.device)
+        rewards = torch.tensor(self.rewards).unsqueeze(1).to(self.device)
+
+        # Predict next states and rewards
+        pred_next_states, pred_rewards = self.env_model(states, actions)
+
+        # Compute loss
+        loss_next_state = nn.MSELoss()(pred_next_states, next_states)
+        loss_reward = nn.MSELoss()(pred_rewards, rewards)
+
+        env_model_loss = loss_next_state + loss_reward
+
+        self.optimizer_env_model.zero_grad()
+        env_model_loss.backward()
+        self.optimizer_env_model.step()
+
+    def reset_memory(self):
         self.log_probs = []
         self.rewards = []
+        self.states = []
+        self.actions = []
+        self.next_states = []
+        self.dones = []
 
 class BallInCageEnv:
     def __init__(self):
@@ -117,7 +241,7 @@ class BallInCageEnv:
         return torch.tensor(self.get_state(), dtype=torch.float32)
 
     def get_state(self):
-        # Return the state for neural network: relative enemy position and wall positions
+        # Return the state for neural network: relative enemy position and wall distances
         rel_enemy_x = self.enemy_pos[0] - self.ball_pos[0]
         rel_enemy_y = self.enemy_pos[1] - self.ball_pos[1]
         wall_info = [
@@ -178,9 +302,10 @@ class BallInCageEnv:
         if distance < (self.ball_radius + self.enemy_radius):
             return self.max_penalty
 
-        # Apply a scaled penalty; the closer, the higher the penalty. Past range, penalty is negative (reward)
+        # Apply a scaled penalty; the closer, the higher the penalty. Past range, penalty is zero
         proximity_ratio = (self.proximity_penalty_range - distance) / self.proximity_penalty_range
         penalty = self.max_penalty * proximity_ratio
+        penalty = max(0.0, penalty)  # Ensure penalty is non-negative
         return penalty
 
     def check_collision(self, pos1, pos2):
@@ -198,7 +323,6 @@ class BallInCageEnv:
 
         pygame.display.flip()
 
-
 # GUI for human feedback
 class HumanFeedbackGUI:
     def __init__(self, rlhf_system):
@@ -214,9 +338,8 @@ class HumanFeedbackGUI:
         self.window.update_idletasks()
         self.window.update()
 
-
 def model_params_match(model, path):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # if multiple GPUs, use cuda:0, cuda:1, etc.
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     checkpoint = torch.load(path, map_location=device)
     model_state_dict = model.state_dict()
     # Compare the shapes of the parameters
@@ -238,12 +361,33 @@ def main():
 
     input_size = 6  # State space: relative enemy position (2) + wall distances (4)
     hidden_size = 64
-    
-    policy_net = ActuatorPolicyNet(input_size, hidden_size, output_size=4).to(device)
-    if os.path.exists(r'models/actuator_policy_net.pth') and model_params_match(policy_net, r'models/actuator_policy_net.pth'):
-        policy_net.load_state_dict(torch.load(r'models/actuator_policy_net.pth'))
-    optimizer = optim.Adam(policy_net.parameters(), lr=0.001)
-    rlhf_system = RLHFSystem(policy_net, optimizer, device=device)
+    action_size = 4
+
+    policy_net = ActuatorPolicyNet(input_size, hidden_size, output_size=action_size).to(device)
+    env_model = EnvironmentModel(state_size=input_size, action_size=action_size, hidden_size=hidden_size).to(device)
+    value_function = ValueFunction(state_size=input_size, hidden_size=hidden_size).to(device)
+
+    # Load models if they exist
+    if os.path.exists('models/actuator_policy_net.pth') and model_params_match(policy_net, 'models/actuator_policy_net.pth'):
+        policy_net.load_state_dict(torch.load('models/actuator_policy_net.pth'))
+    if os.path.exists('models/environment_model.pth') and model_params_match(env_model, 'models/environment_model.pth'):
+        env_model.load_state_dict(torch.load('models/environment_model.pth'))
+    if os.path.exists('models/value_function.pth') and model_params_match(value_function, 'models/value_function.pth'):
+        value_function.load_state_dict(torch.load('models/value_function.pth'))
+
+    optimizer_policy = optim.Adam(policy_net.parameters(), lr=0.001)
+    optimizer_env_model = optim.Adam(env_model.parameters(), lr=0.001)
+    optimizer_value = optim.Adam(value_function.parameters(), lr=0.001)
+
+    # Choose method: 'MC' or 'TD_lambda'
+    # method = 'MC'  # For Monte Carlo
+    method = 'TD_lambda'  # Uncomment for TD(λ)
+
+    rlhf_system = RLHFSystem(
+        policy_net, env_model, value_function,
+        optimizer_policy, optimizer_env_model, optimizer_value,
+        device=device, method=method
+    )
 
     feedback_gui = HumanFeedbackGUI(rlhf_system)
     env = BallInCageEnv()
@@ -251,7 +395,7 @@ def main():
     state = env.reset().to(device)
     running = True
     clock = pygame.time.Clock()
-    update_interval = 2  # Update policy every N steps
+    update_interval = 5  # Update policy every N steps
     step = 0
 
     while running:
@@ -270,8 +414,12 @@ def main():
         # Update environment
         reward = env.update(action, cursor_pos)
 
-        # Store outcomes
-        rlhf_system.store_outcome(log_prob, reward)
+        # Prepare next state
+        next_state = torch.tensor(env.get_state(), dtype=torch.float32).to(device)
+
+        # Store transition
+        done = False  # You can define a condition for episode termination
+        rlhf_system.store_transition(state, action, log_prob, reward, next_state, done)
 
         # Render environment
         env.render(screen)
@@ -279,21 +427,25 @@ def main():
         # Update human feedback from GUI
         feedback_gui.update_feedback()
 
-        # Prepare next state
-        state = torch.tensor(env.get_state(), dtype=torch.float32).to(device)
+        state = next_state
 
         # Increment step counter
         step += 1
 
-        # Update the policy after a defined number of steps, but without resetting the environment
+        # Update the policy after a defined number of steps
         if step % update_interval == 0:
             rlhf_system.update_policy()
 
         # Control frame rate
         clock.tick(30)
+        # Create directories if they don't exist
+        if not os.path.exists('models'):
+            os.makedirs('models')
 
-    # Save the trained policy network
-    torch.save(rlhf_system.policy_net.state_dict(), r'models/actuator_policy_net.pth')
+        # Save the trained models
+        torch.save(rlhf_system.policy_net.state_dict(), 'models/actuator_policy_net.pth')
+        torch.save(rlhf_system.env_model.state_dict(), 'models/environment_model.pth')
+        torch.save(rlhf_system.value_function.state_dict(), 'models/value_function.pth')
     pygame.quit()
     feedback_gui.window.destroy()
 
