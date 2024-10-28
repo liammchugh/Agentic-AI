@@ -4,9 +4,11 @@
 
 ## Projects
 
-#### Emotive Recognition RL Home Explorer-Bot
+#### Semantic Recognition RL Home Explorer-Bot
+On-device semantic recognition for explorative training scheme
 
 #### Emotive Recognition for Vibe Check 
+Basic Vibe Report from Social Environment Emotion Cognition
 
 #### Joint Encoding Predictive Architectures for Action Search 
 Notes:
