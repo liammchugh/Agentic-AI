@@ -119,11 +119,11 @@ class RLHFSystem:
         adjusted_reward = reward * feedback_factor
         return adjusted_reward
 
-    def update_policy(self):
+    def update_policy(self, env, initial_state, cursor_pos, T=10):
         if self.method == 'MC':
             self.update_policy_mc()
         elif self.method == 'TD_lambda':
-            self.update_policy_td_lambda()
+            self.update_policy_td_lambda(env, initial_state, cursor_pos, T)
         else:
             raise ValueError("Invalid method selected. Choose 'MC' or 'TD_lambda'.")
 
@@ -158,40 +158,97 @@ class RLHFSystem:
 
     def standardize(self, x):
         return (x - x.mean()) / (x.std() + 1e-5)
+        
+    def update_policy_td_lambda(self, env, initial_state, cursor_pos, T=10):
+        # TD(λ) Update with Eligibility Traces using Environment Model Simulation
+        # Parameters:
+        # - env: the environment instance (needed for certain functions)
+        # - initial_state: the starting state for simulation
+        # - cursor_pos: the current cursor position (for enemy movement in simulation)
+        # - T: number of steps to simulate
 
-    def update_policy_td_lambda(self):
-        # TD(λ) Update with Eligibility Traces
-        T = len(self.states)
-        values = []
-        for state in self.states:
+        # Initialize lists to store simulation data
+        sim_states = []
+        sim_actions = []
+        sim_log_probs = []
+        sim_rewards = []
+        sim_values = []
+
+        # Set the state to the initial state
+        state = initial_state.clone().detach().to(self.device)
+        hidden = self.policy_net.init_hidden(self.device)  # Reset hidden state if necessary
+
+        # Simulate T steps
+        for t in range(T):
+            # Get action from policy network
+            action_mean, action_log_std, hidden = self.policy_net(state.unsqueeze(0), hidden)
+            action_std = torch.exp(action_log_std)
+            dist = torch.distributions.Normal(action_mean, action_std)
+            action = dist.sample()
+            action = torch.tanh(action)
+            action = action.squeeze(0)  # Remove batch dimension
+            log_prob = dist.log_prob(action).sum()
+
+            # Store state, action, and log_prob
+            sim_states.append(state)
+            sim_actions.append(action)
+            sim_log_probs.append(log_prob)
+
+            # Predict next state and reward using the environment model
+            predicted_next_state, predicted_reward = self.env_model(state, action)
+            predicted_next_state = predicted_next_state.detach()
+            predicted_reward = predicted_reward.squeeze(0)
+
+            # Adjust reward with human feedback
+            adjusted_reward = self.integrate_human_feedback(predicted_reward)
+            sim_rewards.append(adjusted_reward)
+
+            # Compute value of the current state
             value = self.value_function(state)
-            values.append(value)
-        values = torch.stack(values).squeeze()
+            sim_values.append(value.squeeze(0))
 
+            # Update state for next step
+            state = predicted_next_state
+
+            # For simplicity, we can assume the cursor remains static in the simulation
+    
+        # Convert lists to tensors
+        sim_rewards = torch.stack(sim_rewards)
+        sim_values = torch.stack(sim_values)
+        sim_log_probs = torch.stack(sim_log_probs)
+
+        # Initialize variables for TD(λ)
+        G = torch.zeros(1).to(self.device)
+        policy_losses = []
+        value_losses = []
+
+        # Compute advantages and accumulate losses
+        for t in reversed(range(T)):
+            if t == T - 1:
+                G = sim_rewards[t]
+            else:
+                G = sim_rewards[t] + self.gamma * ((1 - self.lam) * sim_values[t + 1] + self.lam * G)
+            advantage = G - sim_values[t]
+            policy_loss = -sim_log_probs[t] * advantage.detach()
+            value_loss = advantage.pow(2)
+
+            policy_losses.append(policy_loss)
+            value_losses.append(value_loss)
+
+        # Sum the losses
+        total_policy_loss = torch.stack(policy_losses).sum()
+        total_value_loss = torch.stack(value_losses).sum()
+        print("Policy Loss:", total_policy_loss.item())
+        print("Value Loss:", total_value_loss.item())
+        # Perform backpropagation and optimization step
         self.optimizer_policy.zero_grad()
         self.optimizer_value.zero_grad()
 
-        G = torch.zeros(1).to(self.device)
-        for t in reversed(range(T)):
-            if t == T - 1:
-                G = self.rewards[t]
-            else:
-                G = self.rewards[t] + self.gamma * ((1 - self.lam) * values[t + 1] + self.lam * G)
-            advantage = G - values[t]
-            policy_loss = -self.log_probs[t] * advantage.detach()
-            value_loss = advantage.pow(2)
-
-            policy_loss.backward(retain_graph=True)
-            value_loss.backward(retain_graph=True)
+        total_policy_loss.backward()
+        total_value_loss.backward()
 
         self.optimizer_policy.step()
         self.optimizer_value.step()
-
-        # Train the environment model
-        self.train_env_model()
-
-        # Clear stored data
-        self.reset_memory()
 
     def train_env_model(self):
         # Train the environment model using collected transitions
@@ -211,7 +268,7 @@ class RLHFSystem:
         loss_reward = nn.MSELoss()(pred_rewards, rewards)
 
         env_model_loss = loss_next_state + loss_reward
-
+        print("Env Model Loss:", env_model_loss.item())
         self.optimizer_env_model.zero_grad()
         env_model_loss.backward()
         self.optimizer_env_model.step()
@@ -233,7 +290,7 @@ class BallInCageEnv:
         self.enemy_radius = 15  # Radius of enemy ball
         self.max_enemy_speed = 5  # Maximum enemy speed
         self.max_penalty = 25  # Maximum penalty for full collision
-        self.proximity_penalty_range = self.ball_radius + self.enemy_radius + 50  # Effective range for increasing penalty
+        self.proximity_penalty_range = self.ball_radius + self.enemy_radius + 6*self.enemy_radius  # Effective range for increasing penalty
 
     def reset(self):
         self.ball_pos = [random.randint(100, 500), random.randint(100, 500)]
@@ -282,14 +339,14 @@ class BallInCageEnv:
         # Update enemy ball position (controlled by cursor, limited by speed)
         enemy_dx = cursor_pos[0] - self.enemy_pos[0]
         enemy_dy = cursor_pos[1] - self.enemy_pos[1]
-        distance = math.sqrt(enemy_dx**2 + enemy_dy**2)
-
-        if distance > self.max_enemy_speed:
-            enemy_dx = (enemy_dx / distance) * self.max_enemy_speed
-            enemy_dy = (enemy_dy / distance) * self.max_enemy_speed
-
+        curs_distance = math.sqrt(enemy_dx**2 + enemy_dy**2)
+        if curs_distance > self.max_enemy_speed:
+            enemy_dx = (enemy_dx / curs_distance) * self.max_enemy_speed
+            enemy_dy = (enemy_dy / curs_distance) * self.max_enemy_speed
         self.enemy_pos[0] += enemy_dx
         self.enemy_pos[1] += enemy_dy
+
+        distance = math.sqrt((self.ball_pos[0] - self.enemy_pos[0]) ** 2 + (self.ball_pos[1] - self.enemy_pos[1]) ** 2)
 
         # Calculate the proximity penalty based on distance from the enemy ball
         penalty = self.calculate_proximity_penalty(distance)
@@ -302,10 +359,9 @@ class BallInCageEnv:
         if distance < (self.ball_radius + self.enemy_radius):
             return self.max_penalty
 
-        # Apply a scaled penalty; the closer, the higher the penalty. Past range, penalty is zero
+        # Apply a scaled penalty; the closer, the higher the penalty. 0.5 negative penalty past range
         proximity_ratio = (self.proximity_penalty_range - distance) / self.proximity_penalty_range
         penalty = self.max_penalty * proximity_ratio
-        penalty = max(0.0, penalty)  # Ensure penalty is non-negative
         return penalty
 
     def check_collision(self, pos1, pos2):
@@ -360,7 +416,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     input_size = 6  # State space: relative enemy position (2) + wall distances (4)
-    hidden_size = 64
+    hidden_size = 4
     action_size = 4
 
     policy_net = ActuatorPolicyNet(input_size, hidden_size, output_size=action_size).to(device)
@@ -382,6 +438,7 @@ def main():
     # Choose method: 'MC' or 'TD_lambda'
     # method = 'MC'  # For Monte Carlo
     method = 'TD_lambda'  # Uncomment for TD(λ)
+    T = 10  # Number of steps to simulate for TD(λ)
 
     rlhf_system = RLHFSystem(
         policy_net, env_model, value_function,
@@ -434,7 +491,7 @@ def main():
 
         # Update the policy after a defined number of steps
         if step % update_interval == 0:
-            rlhf_system.update_policy()
+            rlhf_system.update_policy(env, state, cursor_pos, T)
 
         # Control frame rate
         clock.tick(30)
