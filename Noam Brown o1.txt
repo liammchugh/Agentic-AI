@@ -1,0 +1,31 @@
+Noam Brown o1
+
+Notes
+next-word prediction requires high intelligence
+Inference cost tradeoffs for planning: scaling tracking?
+
+Questions
+Best research paths in semantic planning: embedding & reward, architecture, generalization, benchmarks?
+Synthetic data vs model size
+
+Small Models:
+Inference cost tradeoffs for planning: scaling tracking?
+Utility timescale of low-latency edge/mobile systems
+Cost value of small self-contained edge models
+
+
+THOUGHTS
+Planning features / nodes: Cost of redundancy in models
+Semantic encoders in training for planning
+
+Real compute of thinking time (ex x100,000 in training vs same amt in inference but distributed across edge)
+TrainvsTest: 15xTest=-10xTrain ... maybe different for semantics
+
+Inference Compute for LLM/semantics: 
+Consensus: flatlines over 100 samples
+Pruning: current system to prune system during test-time
+o1: Chain-of-thought through large-scale RL
+
+Development Incentives: Align with high-level goals
+
+
