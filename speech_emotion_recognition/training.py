@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from SER_architecture import EmotionClassifier, SERModel
+from SER_architecture import MLP_EmotionClassifier, SERModel
 import torchaudio
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
@@ -64,7 +64,6 @@ def validate_model(model, val_loader, criterion):
 
     return correct / total
 
-
 # Objective function for Optuna Hyperparameter Optimization
 def objective(trial, train_loader, val_loader):
     # Suggest hyperparameters
@@ -75,18 +74,20 @@ def objective(trial, train_loader, val_loader):
     # Initialize model, optimizer, and loss function
     input_dim = 1024  # Feature size from XLSR
     num_classes = 4  # Assuming 4 emotion classes (adjust based on dataset)
-    classifier = EmotionClassifier(input_dim, hidden_dim, num_classes)
 
+    classifier = MLP_EmotionClassifier(input_dim, hidden_dim, num_classes)
     # Load XLSR model and processor
-    from transformers import Wav2Vec2Processor, Wav2Vec2Model
+    from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2FeatureExtractor
     model_name = "facebook/wav2vec2-xlsr-53"
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
     processor = Wav2Vec2Processor.from_pretrained(model_name)
     xlsr_model = Wav2Vec2Model.from_pretrained(model_name)
     # Freeze XLSR model parameters (no fine-tuning)
     for param in xlsr_model.parameters():
         param.requires_grad = False    
 
-    ser_model = SERModel(xlsr_model, classifier, layer_to_extract=12)
+    ser_model = SERModel(xlsr_model, classifier, layer_to_extract=None)
+    # currently running complete model
     optimizer = optim.Adam(ser_model.classifier.parameters(), lr=lr)
     warmup_steps = 50
     total_steps = len(train_loader) * 10  # 10 epochs
@@ -108,7 +109,6 @@ if __name__ == "__main__":
     # Create DataLoaders
     train_loader = DataLoader(SERDataset(train_files, train_labels, processor), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(SERDataset(val_files, val_labels, processor), batch_size=batch_size, shuffle=False)
-
 
     from hyperopt import fmin, tpe, hp, Trials
     from hyperopt.fmin import space_eval
