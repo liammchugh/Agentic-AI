@@ -23,8 +23,12 @@ def analyze_files_with_gpt(files, gpt_version="gpt-3.5-turbo"):
         ],
         model=gpt_version,
         max_tokens=250,
+        stream=True,
     )
-    return response.choices[0].text.strip()
+    result = ""
+    for chunk in response:
+        result += chunk.choices[0].delta.content or ""
+    return result
 
 
 if __name__ == "__main__":
