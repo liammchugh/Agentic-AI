@@ -90,7 +90,7 @@ def main(args):
     model(dummy_batch)
 
     criterion = QuantileLoss(config).cuda()
-    torch.optim.Adam(model.parameters(), lr=args.lr, fused=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, fused=True)
     if args.distributed_world_size > 1:
         model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
 
@@ -170,11 +170,13 @@ def main(args):
     unscaled_predictions = torch.from_numpy(unscaled_predictions).contiguous()
     unscaled_targets = torch.from_numpy(unscaled_targets).contiguous()
 
-    losses = QuantileLoss(config)(unscaled_predictions, unscaled_targets)
+    losses = criterion(unscaled_predictions, unscaled_targets)
     normalizer = unscaled_targets.abs().mean()
+    
     quantiles = 2 * losses / normalizer
 
     if args.distributed_world_size > 1:
+        # assuming quantile loss needs work
         quantiles = quantiles.cuda()
         dist.all_reduce(quantiles)
         quantiles /= args.distributed_world_size

@@ -9,9 +9,9 @@ Best research paths in semantic planning: embedding & reward, architecture, gene
 Synthetic data vs model size
 
 Small Models:
-Inference cost tradeoffs for planning: scaling tracking?
+Inference cost trades for planning
 Utility timescale of low-latency edge/mobile systems
-Cost value of small self-contained edge models
+Cost value of small self-contained edge models in context of datacenter economics, latency
 
 
 THOUGHTS
